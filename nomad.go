@@ -1511,3 +1511,5 @@ func main() {
   s := IRCServer{}
   s.Run()
 }
+
+// © 2014 Hugo Landau <hlandau@devever.net>    GPLv3 or later

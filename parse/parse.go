@@ -409,3 +409,5 @@ func (p *IRCParser) pdispatch(c rune) error {
 
   return nil
 }
+
+// © 2014 Hugo Landau <hlandau@devever.net>    GPLv3 or later
