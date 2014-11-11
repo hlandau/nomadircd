@@ -1,7 +1,7 @@
 package main
 import "net"
 import "github.com/hlandau/degoutils/log"
-import "nomad/parse"
+import "github.com/hlandau/nomadircd/parse"
 import "fmt"
 import "regexp"
 import "strings"
