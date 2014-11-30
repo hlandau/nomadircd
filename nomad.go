@@ -568,7 +568,7 @@ func (c *IRCClient) send(msg *parse.IRCMessage) {
 		return
 	}
 
-	s := msg.Serialize()
+	s := msg.String()
 
 	if c.sendqCur+uint(len(s)) > c.sendqMax {
 		c.terminate("sendq exceeded")

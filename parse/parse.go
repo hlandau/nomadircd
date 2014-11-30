@@ -30,7 +30,7 @@ func (m *IRCMessage) IsFromClient() bool {
 	return m.NickName != ""
 }
 
-func (m *IRCMessage) Serialize() string {
+func (m *IRCMessage) String() string {
 	s := ""
 	if m.ServerName != "" {
 		s += ":"
