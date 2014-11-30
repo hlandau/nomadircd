@@ -1,7 +1,9 @@
-package main
+package server
 
 import "net"
 import "github.com/hlandau/degoutils/log"
+import "github.com/hlandau/nomadircd/ident"
+import "github.com/hlandau/nomadircd/rdns"
 import "github.com/hlandau/nomadircd/parse"
 import "fmt"
 import "regexp"
@@ -14,9 +16,6 @@ import "crypto/tls"
 import "encoding/binary"
 import "encoding/base64"
 import "strconv"
-import "bufio"
-import "io"
-import "sync"
 
 var re_validNickName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$`)
 var re_validUserName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$`)
@@ -24,12 +23,19 @@ var re_validRealName = regexp.MustCompile(`^[^\r\n\t]{0,64}$`)
 var re_validChannelName = regexp.MustCompile(`^[#&][a-zA-Z0-9_#.<>-]{1,32}$`)
 var re_validHostName = regexp.MustCompile(`^([a-zA-Z0-9][a-zA-Z0-9-]*\.)*[a-zA-Z0-9][a-zA-Z0-9-]*\.?$`)
 
-type IRCServer struct {
-	Name        string
-	Description string
+type Config struct {
+	ServerName        string `default:"irc-server" description:"Server name"`
+	ServerDescription string `default:"IRC Server" description:"Server description"`
 
-	clientsByNick  map[string]*IRCClient
-	channelsByName map[string]*IRCChannel
+	ListenAddr    string `default:":6667" description:"Address to listen on"`
+	TLSListenAddr string `default:":6697" description:"TLS address to listen on"`
+}
+
+type Server struct {
+	cfg Config
+
+	clientsByNick  map[string]*Client
+	channelsByName map[string]*Channel
 
 	unregisteredClients list.List
 
@@ -37,10 +43,20 @@ type IRCServer struct {
 	pingTokenCounter uint64
 	motd             []string
 
+	listeners []net.Listener
+	stopChan  chan struct{}
+
 	cloakKey [32]byte
 }
 
-func (s *IRCServer) FindClientByNickName(nickName string) *IRCClient {
+func New(cfg Config) (*Server, error) {
+	s := &Server{cfg: cfg}
+	s.stopChan = make(chan struct{})
+
+	return s, nil
+}
+
+func (s *Server) FindClientByNickName(nickName string) *Client {
 	if c, ok := s.clientsByNick[canonicalizeNickName(nickName)]; ok {
 		return c
 	} else {
@@ -48,7 +64,7 @@ func (s *IRCServer) FindClientByNickName(nickName string) *IRCClient {
 	}
 }
 
-func (s *IRCServer) FindChannelByName(channelName string) *IRCChannel {
+func (s *Server) FindChannelByName(channelName string) *Channel {
 	if ch, ok := s.channelsByName[canonicalizeChannelName(channelName)]; ok {
 		return ch
 	} else {
@@ -56,7 +72,7 @@ func (s *IRCServer) FindChannelByName(channelName string) *IRCChannel {
 	}
 }
 
-func (s *IRCServer) FindOrCreateChannelByName(channelName string) *IRCChannel {
+func (s *Server) FindOrCreateChannelByName(channelName string) *Channel {
 	ch := s.FindChannelByName(channelName)
 	if ch != nil {
 		return ch
@@ -65,10 +81,10 @@ func (s *IRCServer) FindOrCreateChannelByName(channelName string) *IRCChannel {
 	return s.NewChannel(channelName)
 }
 
-func (s *IRCServer) NewChannel(channelName string) *IRCChannel {
-	ch := &IRCChannel{}
+func (s *Server) NewChannel(channelName string) *Channel {
+	ch := &Channel{}
 	ch.Name = channelName
-	ch.clientsByNick = map[string]*IRCChannelMember{}
+	ch.clientsByNick = map[string]*ChannelMember{}
 	ch.s = s
 	ch.mNoExt = true
 	ch.mTopicLock = true
@@ -78,8 +94,8 @@ func (s *IRCServer) NewChannel(channelName string) *IRCChannel {
 	return ch
 }
 
-type IRCClient struct {
-	s      *IRCServer
+type Client struct {
+	s      *Server
 	conn   net.Conn
 	txChan chan string
 
@@ -93,7 +109,7 @@ type IRCClient struct {
 
 	registered bool
 
-	channels list.List // of *IRCChannelMember
+	channels list.List // of *ChannelMember
 
 	lastPrivmsg time.Time
 	lastMessage time.Time
@@ -122,7 +138,7 @@ type IRCClient struct {
 	identConn          net.Conn
 }
 
-func (c *IRCClient) UserName() string {
+func (c *Client) UserName() string {
 	if c.Ident != "" {
 		return c.Ident
 	} else {
@@ -130,7 +146,7 @@ func (c *IRCClient) UserName() string {
 	}
 }
 
-func (c *IRCClient) HostName() string {
+func (c *Client) HostName() string {
 	if c.VirtualHostName != "" {
 		return c.VirtualHostName
 	}
@@ -142,12 +158,12 @@ func (c *IRCClient) HostName() string {
 	return c.RealHostName
 }
 
-func (c *IRCClient) encloakHostName(realHostName string) string {
+func (c *Client) encloakHostName(realHostName string) string {
 	// TODO
 	return realHostName
 }
 
-func (c *IRCClient) serializeModes(rc *IRCClient) (mspec string, margs []string) {
+func (c *Client) serializeModes(rc *Client) (mspec string, margs []string) {
 	mspec = "+"
 	if c.mInvisible {
 		mspec += "i"
@@ -159,11 +175,11 @@ func (c *IRCClient) serializeModes(rc *IRCClient) (mspec string, margs []string)
 	return
 }
 
-func (c *IRCClient) pingTime() time.Duration {
+func (c *Client) pingTime() time.Duration {
 	return time.Duration(30) * time.Second
 }
 
-func (c *IRCClient) checkPing() {
+func (c *Client) checkPing() {
 	if !c.registered {
 		if time.Now().Sub(c.logonTime) > c.pingTime() {
 			c.terminate("Failed to complete registration")
@@ -192,7 +208,7 @@ func (c *IRCClient) checkPing() {
 	}
 }
 
-func (s *IRCServer) generatePingToken() string {
+func (s *Server) generatePingToken() string {
 	token := make([]byte, 6)
 	nonce := make([]byte, 8)
 	s.pingTokenCounter++
@@ -201,20 +217,20 @@ func (s *IRCServer) generatePingToken() string {
 	return base64.StdEncoding.EncodeToString(token)
 }
 
-func (c *IRCClient) sendPing() {
+func (c *Client) sendPing() {
 	c.lastPing = time.Now()
 	c.pingToken = c.s.generatePingToken()
 	c.sendCommandBare("PING", c.pingToken)
 }
 
-func (c *IRCClient) terminateIdentCheck() {
+func (c *Client) terminateIdentCheck() {
 	if c.identConn != nil {
 		c.identConn.Close()
 		c.identConn = nil
 	}
 }
 
-func (c *IRCClient) terminate(reason string) {
+func (c *Client) terminate(reason string) {
 	if c.isTerminated {
 		return
 	}
@@ -224,7 +240,7 @@ func (c *IRCClient) terminate(reason string) {
 	cname := canonicalizeNickName(c.NickName)
 
 	for e := c.channels.Front(); e != nil; e = e.Next() {
-		m := e.Value.(*IRCChannelMember)
+		m := e.Value.(*ChannelMember)
 		m.channel.NotifyUserQuit(c, reason)
 		m.channel.RemoveUser(c)
 	}
@@ -240,25 +256,25 @@ func (c *IRCClient) terminate(reason string) {
 	}
 }
 
-type IRCMask struct {
+type Mask struct {
 	NickName string
 	UserName string
 	HostName string
 }
 
-func (m *IRCMask) String() string {
+func (m *Mask) String() string {
 	return m.NickName + "!" + m.UserName + "@" + m.HostName
 }
 
-func (m *IRCMask) CheckMatch(c *IRCClient) bool {
+func (m *Mask) CheckMatch(c *Client) bool {
 	return false
 }
 
-type IRCChannel struct {
+type Channel struct {
 	Name          string
 	Topic         string
-	clientsByNick map[string]*IRCChannelMember
-	s             *IRCServer
+	clientsByNick map[string]*ChannelMember
+	s             *Server
 
 	mNoExt      bool
 	mTopicLock  bool
@@ -269,12 +285,12 @@ type IRCChannel struct {
 	mLimit      int // -1: no limit
 	mNoKnock    bool
 
-	banList    list.List // of *IRCMask
-	exemptList list.List // of *IRCMask
-	invexList  list.List // of *IRCMask
+	banList    list.List // of *Mask
+	exemptList list.List // of *Mask
+	invexList  list.List // of *Mask
 }
 
-func (ch *IRCChannel) serializeModes(c *IRCClient) (mspec string, margs []string) {
+func (ch *Channel) serializeModes(c *Client) (mspec string, margs []string) {
 	mspec = "+"
 	if ch.mNoExt {
 		mspec += "n"
@@ -303,7 +319,7 @@ func (ch *IRCChannel) serializeModes(c *IRCClient) (mspec string, margs []string
 	return
 }
 
-func (ch *IRCChannel) testCanKnock(k *IRCClient) bool {
+func (ch *Channel) testCanKnock(k *Client) bool {
 	if ch.mNoKnock {
 		return false
 	}
@@ -311,26 +327,26 @@ func (ch *IRCChannel) testCanKnock(k *IRCClient) bool {
 	return true
 }
 
-func (ch *IRCChannel) sendCommandFromUser(from *IRCClient, cmd string, args ...string) {
+func (ch *Channel) sendCommandFromUser(from *Client, cmd string, args ...string) {
 	for _, m := range ch.clientsByNick {
 		m.client.sendCommandFromUser(from, cmd, args...)
 	}
 }
 
-func (ch *IRCChannel) SendMsg(from *IRCClient, msg string, cmd string) {
+func (ch *Channel) SendMsg(from *Client, msg string, cmd string) {
 	for _, m := range ch.clientsByNick {
 		m.client.sendCommandFromUser(from, cmd, m.client.NickName, msg)
 	}
 }
 
-func (ch *IRCChannel) SetTopic(setter *IRCClient, topic string) {
+func (ch *Channel) SetTopic(setter *Client, topic string) {
 	ch.Topic = topic
 	for _, m := range ch.clientsByNick {
 		m.client.sendCommandFromUser(setter, "TOPIC", ch.Name, topic)
 	}
 }
 
-func (ch *IRCChannel) AddUser(c *IRCClient) *IRCChannelMember {
+func (ch *Channel) AddUser(c *Client) *ChannelMember {
 	cnick := canonicalizeNickName(c.NickName)
 
 	if m, ok := ch.clientsByNick[cnick]; ok {
@@ -338,7 +354,7 @@ func (ch *IRCChannel) AddUser(c *IRCClient) *IRCChannelMember {
 		return m
 	}
 
-	chmem := &IRCChannelMember{}
+	chmem := &ChannelMember{}
 	chmem.channel = ch
 	chmem.client = c
 	if len(ch.clientsByNick) == 0 {
@@ -356,55 +372,55 @@ func (ch *IRCChannel) AddUser(c *IRCClient) *IRCChannelMember {
 	return chmem
 }
 
-func (ch *IRCChannel) sendNames(c *IRCClient) {
+func (ch *Channel) sendNames(c *Client) {
 	for _, m := range ch.clientsByNick {
 		c.sendNumericFromServer(353, c.NickName, "=", ch.Name, m.DecoratedName())
 	}
 	c.sendNumericFromServer(366, c.NickName, ch.Name, "End of /NAMES list.")
 }
 
-func (ch *IRCChannel) sendWho(c *IRCClient) {
+func (ch *Channel) sendWho(c *Client) {
 	for _, m := range ch.clientsByNick {
 		hopcount := 0
 		hereGone := "H"
 		if m.client.isOperator {
 			hereGone += "*"
 		}
-		c.sendNumericFromServer(352, c.NickName, ch.Name, m.client.UserName(), m.client.HostName(), m.client.s.Name, m.client.NickName, hereGone+m.Decoration(),
+		c.sendNumericFromServer(352, c.NickName, ch.Name, m.client.UserName(), m.client.HostName(), m.client.s.cfg.ServerName, m.client.NickName, hereGone+m.Decoration(),
 			fmt.Sprintf("%d %s", hopcount, m.client.RealName))
 	}
 	c.sendNumericFromServer(315, c.NickName, ch.Name, "End of /WHO list.")
 }
 
-func (ch *IRCChannel) NotifyUserPart(c *IRCClient, reason string) {
+func (ch *Channel) NotifyUserPart(c *Client, reason string) {
 	ch.sendCommandFromUser(c, "PART", ch.Name, reason)
 }
 
-func (ch *IRCChannel) NotifyUserKick(c *IRCClient, kicker *IRCClient, reason string) {
+func (ch *Channel) NotifyUserKick(c *Client, kicker *Client, reason string) {
 	ch.sendCommandFromUser(kicker, "KICK", ch.Name, c.NickName, reason)
 }
 
-func (ch *IRCChannel) NotifyUserKill(c *IRCClient, killer *IRCClient, reason string) {
+func (ch *Channel) NotifyUserKill(c *Client, killer *Client, reason string) {
 	ch.sendCommandFromUser(killer, "KILL", c.NickName, reason)
 }
 
-func (ch *IRCChannel) NotifyUserQuit(c *IRCClient, reason string) {
+func (ch *Channel) NotifyUserQuit(c *Client, reason string) {
 	ch.sendCommandFromUser(c, "QUIT", reason)
 }
 
-func (ch *IRCChannel) NotifyUserInvite(invitee *IRCClient, inviter *IRCClient) {
+func (ch *Channel) NotifyUserInvite(invitee *Client, inviter *Client) {
 	ch.sendCommandFromUser(inviter, "INVITE", invitee.NickName, ch.Name)
 }
 
-func (ch *IRCChannel) NotifyUserNick(c *IRCClient, newNickName string) {
+func (ch *Channel) NotifyUserNick(c *Client, newNickName string) {
 	ch.sendCommandFromUser(c, "NICK", newNickName)
 }
 
-func (ch *IRCChannel) NotifyKnock(k *IRCClient, reason string) {
+func (ch *Channel) NotifyKnock(k *Client, reason string) {
 	ch.sendCommandFromUser(k, "KNOCK", ch.Name, reason)
 }
 
-func (ch *IRCChannel) RemoveUser(c *IRCClient) {
+func (ch *Channel) RemoveUser(c *Client) {
 	cnick := canonicalizeNickName(c.NickName)
 	if _, ok := ch.clientsByNick[cnick]; ok {
 		delete(ch.clientsByNick, cnick)
@@ -416,12 +432,12 @@ func (ch *IRCChannel) RemoveUser(c *IRCClient) {
 	}
 }
 
-func (ch *IRCChannel) KickUser(kickee *IRCClient, kicker *IRCClient, reason string) {
+func (ch *Channel) KickUser(kickee *Client, kicker *Client, reason string) {
 	ch.NotifyUserKick(kickee, kicker, reason)
 	ch.RemoveUser(kickee)
 }
 
-func (ch *IRCChannel) InviteUser(invitee *IRCClient, inviter *IRCClient) {
+func (ch *Channel) InviteUser(invitee *Client, inviter *Client) {
 	if ch.mInviteOnly {
 		if m, ok := ch.clientsByNick[canonicalizeNickName(inviter.NickName)]; ok {
 			if !m.isOp {
@@ -436,14 +452,14 @@ func (ch *IRCChannel) InviteUser(invitee *IRCClient, inviter *IRCClient) {
 	ch.NotifyUserInvite(invitee, inviter)
 }
 
-type IRCChannelMember struct {
-	channel *IRCChannel
-	client  *IRCClient
+type ChannelMember struct {
+	channel *Channel
+	client  *Client
 	isOp    bool
 	isVoice bool
 }
 
-func (m *IRCChannelMember) Decoration() string {
+func (m *ChannelMember) Decoration() string {
 	if m.isOp {
 		return "@"
 	} else if m.isVoice {
@@ -453,7 +469,7 @@ func (m *IRCChannelMember) Decoration() string {
 	}
 }
 
-func (m *IRCChannelMember) DecoratedName() string {
+func (m *ChannelMember) DecoratedName() string {
 	return m.Decoration() + m.client.NickName
 }
 
@@ -485,29 +501,29 @@ func validateChannelName(channelName string) bool {
 	return re_validChannelName.MatchString(channelName)
 }
 
-type DestinationType int
+type destinationType int
 
 const (
-	DT_UNKNOWN DestinationType = iota
-	DT_USER
-	DT_CHANNEL
+	dtUnknown destinationType = iota
+	dtUser
+	dtChannel
 )
 
-func determineDestinationType(dest string) (mtype DestinationType) {
+func determinedestinationType(dest string) (mtype destinationType) {
 	if len(dest) > 0 {
 		if validateChannelName(dest) {
-			return DT_CHANNEL
+			return dtChannel
 		}
 
 		if validateNickName(dest) {
-			return DT_USER
+			return dtUser
 		}
 	}
 
-	return DT_UNKNOWN
+	return dtUnknown
 }
 
-func (c *IRCClient) SetNickName(nickName string) error {
+func (c *Client) SetNickName(nickName string) error {
 	if !validateNickName(nickName) {
 		return fmt.Errorf("invalid nickname")
 	}
@@ -531,7 +547,7 @@ func (c *IRCClient) SetNickName(nickName string) error {
 	c.s.clientsByNick[cNickName] = c
 
 	for e := c.channels.Front(); e != nil; e = e.Next() {
-		m := e.Value.(*IRCChannelMember)
+		m := e.Value.(*ChannelMember)
 		ch := m.channel
 		delete(ch.clientsByNick, cOldNickName)
 
@@ -544,7 +560,7 @@ func (c *IRCClient) SetNickName(nickName string) error {
 	return nil
 }
 
-func (c *IRCClient) SetUserName(userName string) error {
+func (c *Client) SetUserName(userName string) error {
 	if !validateUserName(userName) {
 		return fmt.Errorf("invalid username")
 	}
@@ -553,7 +569,7 @@ func (c *IRCClient) SetUserName(userName string) error {
 	return nil
 }
 
-func (c *IRCClient) SetRealName(realName string) error {
+func (c *Client) SetRealName(realName string) error {
 	if !validateRealName(realName) {
 		return fmt.Errorf("invalid realname")
 	}
@@ -563,7 +579,7 @@ func (c *IRCClient) SetRealName(realName string) error {
 }
 
 // Message must be CRLF terminated.
-func (c *IRCClient) send(msg *parse.IRCMessage) {
+func (c *Client) send(msg *parse.IRCMessage) {
 	if c.isTerminated {
 		return
 	}
@@ -580,61 +596,61 @@ func (c *IRCClient) send(msg *parse.IRCMessage) {
 }
 
 // Message must not be CRLF terminated.
-func (c *IRCClient) sendFromServer(msg *parse.IRCMessage) {
-	msg.ServerName = c.s.Name
+func (c *Client) sendFromServer(msg *parse.IRCMessage) {
+	msg.ServerName = c.s.cfg.ServerName
 	c.send(msg)
 }
 
-func (c *IRCClient) sendLinkError(reason string) {
+func (c *Client) sendLinkError(reason string) {
 	msg := parse.IRCMessage{}
 	msg.Command = "ERROR"
 	msg.Args = append(msg.Args, "Closing Link: "+c.RealHostName+" ("+reason+")")
 	c.send(&msg)
 }
 
-func (c *IRCClient) sendFromUser(from *IRCClient, msg *parse.IRCMessage) {
+func (c *Client) sendFromUser(from *Client, msg *parse.IRCMessage) {
 	msg.NickName = from.NickName
 	msg.UserName = from.UserName()
 	msg.HostName = from.HostName()
 	c.send(msg)
 }
 
-func (c *IRCClient) sendNumericFromServer(n int, args ...string) {
+func (c *Client) sendNumericFromServer(n int, args ...string) {
 	m := parse.IRCMessage{}
 	m.Command = fmt.Sprintf("%03d", n)
 	m.Args = args
 	c.sendFromServer(&m)
 }
 
-func (c *IRCClient) sendCommandFromUser(from *IRCClient, cmd string, args ...string) {
+func (c *Client) sendCommandFromUser(from *Client, cmd string, args ...string) {
 	m := parse.IRCMessage{}
 	m.Command = cmd
 	m.Args = args
 	c.sendFromUser(from, &m)
 }
 
-func (c *IRCClient) sendCommandFromServer(cmd string, args ...string) {
+func (c *Client) sendCommandFromServer(cmd string, args ...string) {
 	m := parse.IRCMessage{}
 	m.Command = cmd
 	m.Args = args
 	c.sendFromServer(&m)
 }
 
-func (c *IRCClient) sendCommandBare(cmd string, args ...string) {
+func (c *Client) sendCommandBare(cmd string, args ...string) {
 	m := parse.IRCMessage{}
 	m.Command = cmd
 	m.Args = args
 	c.send(&m)
 }
 
-func (c *IRCClient) sendMOTD() {
+func (c *Client) sendMOTD() {
 	for i := range c.s.motd {
 		c.sendNumericFromServer(372, c.NickName, c.s.motd[i])
 	}
 	c.sendNumericFromServer(376, c.NickName, "End of /MOTD command.")
 }
 
-func (c *IRCClient) rxLoop() {
+func (c *Client) rxLoop() {
 	defer c.conn.Close()
 
 	buf := make([]byte, 512)
@@ -658,7 +674,7 @@ func (c *IRCClient) rxLoop() {
 	}
 }
 
-func (c *IRCClient) processIncomingMessage(m *parse.IRCMessage) {
+func (c *Client) processIncomingMessage(m *parse.IRCMessage) {
 	log.Info(fmt.Sprintf("rx msg: %+v", m))
 	c.lastMessage = time.Now()
 
@@ -700,7 +716,7 @@ func (c *IRCClient) processIncomingMessage(m *parse.IRCMessage) {
 		}
 
 		token := m.Args[0]
-		c.sendCommandFromServer("PONG", c.s.Name, token)
+		c.sendCommandFromServer("PONG", c.s.cfg.ServerName, token)
 		// ...
 
 	case "PONG":
@@ -725,7 +741,7 @@ func (c *IRCClient) processIncomingMessage(m *parse.IRCMessage) {
 	}
 }
 
-func (c *IRCClient) processIncomingMessageRegistered(m *parse.IRCMessage) {
+func (c *Client) processIncomingMessageRegistered(m *parse.IRCMessage) {
 	switch m.Command {
 	case "PRIVMSG", "NOTICE":
 		if len(m.Args) < 2 {
@@ -734,9 +750,9 @@ func (c *IRCClient) processIncomingMessageRegistered(m *parse.IRCMessage) {
 
 		c.lastPrivmsg = time.Now()
 
-		mtype := determineDestinationType(m.Args[0])
+		mtype := determinedestinationType(m.Args[0])
 		switch mtype {
-		case DT_CHANNEL:
+		case dtChannel:
 			ch := c.s.FindChannelByName(m.Args[0])
 			chm, hasM := ch.clientsByNick[canonicalizeNickName(c.NickName)]
 			if (ch.mNoExt || ch.mModerated) && !hasM {
@@ -749,7 +765,7 @@ func (c *IRCClient) processIncomingMessageRegistered(m *parse.IRCMessage) {
 
 			ch.SendMsg(c, m.Args[1], m.Command)
 
-		case DT_USER:
+		case dtUser:
 			rc := c.s.FindClientByNickName(m.Args[0])
 			if rc != nil {
 				rc.sendCommandFromUser(c, m.Command, rc.NickName, m.Args[1])
@@ -770,7 +786,7 @@ func (c *IRCClient) processIncomingMessageRegistered(m *parse.IRCMessage) {
 			chanlist := ""
 			first := true
 			for e := c.channels.Front(); e != nil; e = e.Next() {
-				m := e.Value.(*IRCChannelMember)
+				m := e.Value.(*ChannelMember)
 				if !first {
 					chanlist += " "
 				} else {
@@ -780,7 +796,7 @@ func (c *IRCClient) processIncomingMessageRegistered(m *parse.IRCMessage) {
 			}
 			c.sendNumericFromServer(311, c.NickName, rc.NickName, rc.UserName(), rc.HostName(), "*", rc.RealName)
 			c.sendNumericFromServer(319, c.NickName, rc.NickName, chanlist)
-			c.sendNumericFromServer(312, c.NickName, rc.NickName, c.s.Name, c.s.Description)
+			c.sendNumericFromServer(312, c.NickName, rc.NickName, c.s.cfg.ServerName, c.s.cfg.ServerDescription)
 			if c.isSecure {
 				c.sendNumericFromServer(671, c.NickName, rc.NickName, "is using a secure connection")
 			}
@@ -932,9 +948,9 @@ func (c *IRCClient) processIncomingMessageRegistered(m *parse.IRCMessage) {
 		}
 
 		target := m.Args[0]
-		mtype := determineDestinationType(m.Args[0])
+		mtype := determinedestinationType(m.Args[0])
 		switch mtype {
-		case DT_CHANNEL:
+		case dtChannel:
 			if changes == "" {
 				// read
 				ch := c.s.FindChannelByName(target)
@@ -1040,7 +1056,7 @@ func (c *IRCClient) processIncomingMessageRegistered(m *parse.IRCMessage) {
 				ch.sendCommandFromUser(c, "MODE", ms...)
 			}
 
-		case DT_USER:
+		case dtUser:
 			if changes == "" {
 				// read
 				rc := c.s.FindClientByNickName(target)
@@ -1164,7 +1180,7 @@ func (c *IRCClient) processIncomingMessageRegistered(m *parse.IRCMessage) {
 	}
 }
 
-func (c *IRCClient) tryCompleteRegistration() {
+func (c *Client) tryCompleteRegistration() {
 	if c.SpecifiedUserName == "" || c.NickName == "" || c.registered {
 		return
 	}
@@ -1184,12 +1200,12 @@ func (c *IRCClient) tryCompleteRegistration() {
 	c.unregisteredClientElement = nil
 
 	c.sendNumericFromServer(1, c.NickName, "Welcome to IRC.")
-	c.sendNumericFromServer(5, c.NickName, "CHANTYPES=#", "EXCEPTS", "INVEX", "CHANMODES=b,k,j,nt", "CHANLIMIT=#:50", "PREFIX=(ov)@+", "MAXLIST=bqeI:100", "MODES=4", "NETWORK="+c.s.Name, "KNOCK", "are supported by this server")
+	c.sendNumericFromServer(5, c.NickName, "CHANTYPES=#", "EXCEPTS", "INVEX", "CHANMODES=b,k,j,nt", "CHANLIMIT=#:50", "PREFIX=(ov)@+", "MAXLIST=bqeI:100", "MODES=4", "NETWORK="+c.s.cfg.ServerName, "KNOCK", "are supported by this server")
 	c.sendNumericFromServer(5, c.NickName, "CASEMAPPING=rfc1459", "NICKLEN=30", "MAXNICKLEN=30", "CHANNELLEN=50", "TOPICLEN=390", "CPRIVMSG", "CNOTICE")
 	c.sendMOTD()
 }
 
-func (c *IRCClient) txLoop() {
+func (c *Client) txLoop() {
 	defer c.conn.Close()
 
 	for x := range c.txChan {
@@ -1204,8 +1220,8 @@ func (c *IRCClient) txLoop() {
 	}
 }
 
-func (s *IRCServer) newClient(c net.Conn) {
-	cl := &IRCClient{}
+func (s *Server) newClient(c net.Conn) {
+	cl := &Client{}
 	cl.s = s
 	cl.conn = c
 	cl.RealHostName = c.RemoteAddr().(*net.TCPAddr).IP.String()
@@ -1234,238 +1250,78 @@ func (s *IRCServer) newClient(c net.Conn) {
 	go cl.txLoop()
 }
 
-func (c *IRCClient) lookupIdent() {
+func (c *Client) lookupIdent() {
 	defer func() {
 		c.regCheckFinishChan <- struct{}{}
 	}()
 
-	ra := c.conn.RemoteAddr().(*net.TCPAddr)
-	la := c.conn.LocalAddr().(*net.TCPAddr)
-
-	dla := net.TCPAddr{la.IP, 0, la.Zone}
-
-	d := net.Dialer{}
-	d.Timeout = time.Duration(5) * time.Second
-	d.LocalAddr = &dla
-
-	ic, err := d.Dial("tcp", net.JoinHostPort(ra.IP.String(), "113"))
+	id, err := ident.Lookup(c.conn, 5*time.Second)
 	if err != nil {
-		log.Info("Couldn't connect to ident server")
 		return
 	}
 
-	c.identConn = ic
-	defer ic.Close()
+	c.Ident = id
+}
 
-	s := fmt.Sprintf("%d, %d\r\n", ra.Port, la.Port)
-	_, err = ic.Write([]byte(s))
+func (c *Client) lookupHostname() {
+	defer func() {
+		c.regCheckFinishChan <- struct{}{}
+	}()
+
+	hostname, err := rdns.LookupRemote(c.conn)
 	if err != nil {
-		log.Info("Couldn't write to ident server")
 		return
 	}
 
-	r := bufio.NewReader(ic)
-	L, err := r.ReadString('\n')
-	if err != nil && err != io.EOF {
-		log.Info("Couldn't read from ident server: ", err)
-		return
-	}
+	c.RealHostName = hostname
+}
 
-	L = strings.Trim(L, " \r\n")
-	La := strings.Split(L, ":")
-	if len(La) < 4 {
-		log.Info("Malformed response from ident server: ", L)
-		return
-	}
+func (c *Client) Stop() {
+	c.conn.Close()
+	close(c.txChan)
+}
 
-	switch strings.Trim(La[1], " ") {
-	case "USERID":
-		//domain   := strings.Trim(La[2], " ")
-		username := strings.Trim(La[3], " ")
-
-		if !re_validUserName.MatchString(username) {
-			log.Info("Malformed username received from ident server")
+func (s *Server) pingLoop() {
+	for {
+		select {
+		case <-time.After(30 * time.Second):
+		case <-s.stopChan:
 			return
 		}
 
-		c.Ident = username
-		log.Info("Ident: ", username)
-
-	default:
-		log.Info("Got error from ident server")
-		return
-	}
-}
-
-func (c *IRCClient) lookupHostname() {
-	defer func() {
-		c.regCheckFinishChan <- struct{}{}
-	}()
-
-	ra := c.conn.RemoteAddr().(*net.TCPAddr).IP.String()
-
-	names, err := net.LookupAddr(ra)
-	if err != nil {
-		log.Info("Couldn't lookup RDNS: ", err)
-		return
-	}
-
-	names = names[0:1]
-
-	if len(names) != 1 {
-		log.Info("Got multiple RDNS names (", names, "), not using any of them.")
-		return
-	}
-
-	n := names[0]
-	if !re_validHostName.MatchString(n) {
-		log.Info("Invalid hostname received from RDNS.")
-		return
-	}
-
-	addrs, err := net.LookupHost(n)
-	if err != nil {
-		log.Info("Failed to do forward consistency check on RDNS result: ", err)
-		return
-	}
-
-	if len(addrs) != 1 {
-		log.Info("Got ", len(addrs), " results when doing forward consistency check on RDNS result, not using any of them.")
-		return
-	}
-
-	a := addrs[0]
-	if a != ra {
-		log.Info("Forward address from RDNS does not match original IP, not using RDNS.")
-		return
-	}
-
-	log.Info("RDNS lookup successful: ", n)
-	c.RealHostName = n
-}
-
-type dnsblCacheItem struct {
-	ip net.IP
-	t  time.Time
-}
-
-type DNSBL struct {
-	domain string
-	cache  map[string]dnsblCacheItem
-	mutex  sync.Mutex
-}
-
-func NewDNSBL(domain string) *DNSBL {
-	d := &DNSBL{
-		domain: domain,
-		cache:  map[string]dnsblCacheItem{},
-	}
-	go d.expireLoop()
-	return d
-}
-
-func (d *DNSBL) expireLoop() {
-	for {
-		time.Sleep(time.Duration(30) * time.Minute)
-
-		d.mutex.Lock()
-		defer d.mutex.Unlock()
-
-		for k, v := range d.cache {
-			if v.t.Add(time.Duration(8) * time.Hour).Before(time.Now()) {
-				delete(d.cache, k)
-			}
-		}
-	}
-}
-
-func (d *DNSBL) query(ip net.IP) (r net.IP, err error) {
-	ip4 := ip.To4()
-
-	ds := fmt.Sprintf("%u.%u.%u.%u.%s", ip4[3], ip4[2], ip4[1], ip4[0], d.domain)
-
-	addrs, err := net.LookupIP(ds)
-	if err != nil {
-		return
-	}
-
-	if len(addrs) == 0 {
-		r = nil
-		return
-	}
-
-	if len(addrs) != 1 {
-		err = fmt.Errorf("several DNSBL replies received, ignoring all of them")
-		return
-	}
-
-	r = addrs[0].To4()
-	return
-}
-
-func (d *DNSBL) Check(ip net.IP) (r net.IP, err error) {
-	if !ip.IsGlobalUnicast() {
-		// Don't even bother looking up 127.0.0.0/8, RFC1918, etc.
-		// Don't put this check in query() as we needn't pollute the cache.
-		return
-	}
-
-	ip_s := ip.String()
-
-	d.mutex.Lock()
-	defer d.mutex.Unlock()
-
-	cr, ok := d.cache[ip_s]
-	if ok {
-		r = cr.ip
-		return
-	}
-
-	r, err = d.query(ip)
-	if err != nil {
-		return
-	}
-
-	d.cache[ip_s] = dnsblCacheItem{r, time.Now()}
-	return
-}
-
-func (s *IRCServer) pingLoop() {
-	for {
-		time.Sleep(time.Duration(30) * time.Second)
 		for _, c := range s.clientsByNick {
 			c.checkPing()
 		}
 
 		for e := s.unregisteredClients.Front(); e != nil; e = e.Next() {
-			c := e.Value.(*IRCClient)
+			c := e.Value.(*Client)
 			c.checkPing()
 		}
 	}
 }
 
-func (s *IRCServer) Run() error {
+func (s *Server) Start() error {
 	_, err := rand.Read(s.pingTokenKey[0:32])
 	log.Fatale(err)
 
 	_, err = rand.Read(s.cloakKey[0:32])
 	log.Fatale(err)
 
-	s.clientsByNick = map[string]*IRCClient{}
-	s.channelsByName = map[string]*IRCChannel{}
+	s.clientsByNick = map[string]*Client{}
+	s.channelsByName = map[string]*Channel{}
 
-	if s.Name == "" {
-		s.Name = "irc-server"
+	if s.cfg.ServerName == "" {
+		s.cfg.ServerName = "irc-server"
 	}
 
-	if s.Description == "" {
-		s.Description = "An IRC Server"
+	if s.cfg.ServerDescription == "" {
+		s.cfg.ServerDescription = "An IRC Server"
 	}
 
 	listeners := make([]net.Listener, 0)
 
 	//
-	listener, err := net.Listen("tcp", ":6668")
+	listener, err := net.Listen("tcp", s.cfg.ListenAddr)
 	log.Fatale(err)
 	listeners = append(listeners, listener)
 
@@ -1486,32 +1342,41 @@ func (s *IRCServer) Run() error {
 		MinVersion: tls.VersionTLS12,
 	}
 
-	tlsL, err := tls.Listen("tcp", ":6697", &tlsConfig)
+	tlsL, err := tls.Listen("tcp", s.cfg.TLSListenAddr, &tlsConfig)
 	log.Fatale(err)
-	listeners = append(listeners, tlsL)
+	s.listeners = append(s.listeners, tlsL)
 
 	//
-	for _, L := range listeners {
+	for _, L := range s.listeners {
 		go s.listenLoop(L)
 	}
 
-	s.pingLoop()
+	go s.pingLoop()
 
 	return nil
 }
 
-func (s *IRCServer) listenLoop(L net.Listener) {
-	for {
-		c, err := L.Accept()
-		log.Fatale(err)
+func (s *Server) Stop() {
+	close(s.stopChan)
 
-		s.newClient(c)
+	for _, L := range s.listeners {
+		L.Close()
+	}
+
+	for _, c := range s.clientsByNick {
+		c.terminate("server exiting")
 	}
 }
 
-func main() {
-	s := IRCServer{}
-	s.Run()
+func (s *Server) listenLoop(L net.Listener) error {
+	for {
+		c, err := L.Accept()
+		if err != nil {
+			return err
+		}
+
+		s.newClient(c)
+	}
 }
 
 // © 2014 Hugo Landau <hlandau@devever.net>    GPLv3 or later
