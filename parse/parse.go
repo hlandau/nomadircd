@@ -67,28 +67,28 @@ func (m *IRCMessage) Serialize() string {
 type parseState int
 
 const (
-	PS_DRIFTING parseState = iota
-	PS_FROMSTART
-	PS_FROMCONT
-	PS_FROMSERVERNPSTART
-	PS_FROMSERVERNPCONT
-	PS_FROMUSERUSTART
-	PS_FROMUSERUCONT
-	PS_FROMUSERHSTART
-	PS_FROMUSERHCONT
-	PS_FROMUSERHNPSTART
-	PS_FROMUSERHNPCONT
-	PS_FROMUSERHIPV6
-	PS_COMMANDSTART
-	PS_COMMANDCONT
-	PS_COMMANDNCONT
-	PS_COMMANDNCONT2
-	PS_PREARGSTART
-	PS_ARGSTART
-	PS_ARGCONT
-	PS_TARGCONT
-	PS_EXPECTLF
-	PS_END
+	psDRIFTING parseState = iota
+	psFROMSTART
+	psFROMCONT
+	psFROMSERVERNPSTART
+	psFROMSERVERNPCONT
+	psFROMUSERUSTART
+	psFROMUSERUCONT
+	psFROMUSERHSTART
+	psFROMUSERHCONT
+	psFROMUSERHNPSTART
+	psFROMUSERHNPCONT
+	psFROMUSERHIPV6
+	psCOMMANDSTART
+	psCOMMANDCONT
+	psCOMMANDNCONT
+	psCOMMANDNCONT2
+	psPREARGSTART
+	psARGSTART
+	psARGCONT
+	psTARGCONT
+	psEXPECTLF
+	psEND
 )
 
 type IRCParser struct {
@@ -135,7 +135,7 @@ func (p *IRCParser) Parse(s string) (err error) {
 		err = p.pdispatch(c)
 		if err != nil {
 			// error recovery: start ignoring until the end of the line
-			p.state = PS_DRIFTING
+			p.state = psDRIFTING
 			p.s = ""
 			p.m = &IRCMessage{}
 			recovery = true
@@ -149,238 +149,238 @@ func (p *IRCParser) Parse(s string) (err error) {
 func (p *IRCParser) pdispatch(c rune) error {
 	//log.Info(fmt.Sprintf("state %+v", p.state))
 	switch p.state {
-	case PS_DRIFTING:
+	case psDRIFTING:
 		if c == ':' {
-			p.state = PS_FROMSTART
+			p.state = psFROMSTART
 		} else {
-			// PS_COMMANDSTART
-			p.state = PS_COMMANDSTART
+			// psCOMMANDSTART
+			p.state = psCOMMANDSTART
 			return p.pdispatch(c) // reissue
 		}
 
-	case PS_FROMSTART:
+	case psFROMSTART:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' {
 			p.s += string(c)
-			p.state = PS_FROMCONT
+			p.state = psFROMCONT
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMCONT:
+	case psFROMCONT:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' {
 			p.s += string(c)
 		} else if c == '.' {
 			p.s += string(c)
-			p.state = PS_FROMSERVERNPSTART
+			p.state = psFROMSERVERNPSTART
 		} else if c == '!' {
 			p.m.NickName = p.s
-			p.state = PS_FROMUSERUSTART
+			p.state = psFROMUSERUSTART
 			p.s = ""
 		} else if c == ' ' {
 			p.m.ServerName = p.s
-			p.state = PS_COMMANDSTART
+			p.state = psCOMMANDSTART
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMSERVERNPSTART:
+	case psFROMSERVERNPSTART:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' {
 			p.s += string(c)
-			p.state = PS_FROMSERVERNPCONT
+			p.state = psFROMSERVERNPCONT
 		} else if c == ' ' {
 			// server name with trailing .
 			p.m.ServerName = p.s[0 : len(p.s)-1]
-			p.state = PS_COMMANDSTART
+			p.state = psCOMMANDSTART
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMSERVERNPCONT:
+	case psFROMSERVERNPCONT:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' {
 			p.s += string(c)
 		} else if c == '.' {
 			p.s += string(c)
-			p.state = PS_FROMSERVERNPSTART
+			p.state = psFROMSERVERNPSTART
 		} else if c == ' ' {
 			p.m.ServerName = p.s
-			p.state = PS_COMMANDSTART
+			p.state = psCOMMANDSTART
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMUSERUSTART:
+	case psFROMUSERUSTART:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' || c == '~' {
 			p.s += string(c)
 		} else if c == '@' {
 			p.m.UserName = p.s
-			p.state = PS_FROMUSERHSTART
+			p.state = psFROMUSERHSTART
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMUSERUCONT:
+	case psFROMUSERUCONT:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' || c == '~' {
 			p.s += string(c)
 		} else if c == '@' {
 			p.m.UserName = p.s
-			p.state = PS_FROMUSERHSTART
+			p.state = psFROMUSERHSTART
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMUSERHSTART:
+	case psFROMUSERHSTART:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' {
 			p.s += string(c)
-			p.state = PS_FROMUSERHCONT
+			p.state = psFROMUSERHCONT
 		} else if c == ' ' {
-			p.state = PS_COMMANDSTART
+			p.state = psCOMMANDSTART
 			p.m.HostName = p.s
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMUSERHCONT:
+	case psFROMUSERHCONT:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' {
 			p.s += string(c)
 		} else if c == '.' {
 			p.s += string(c)
-			p.state = PS_FROMUSERHNPSTART
+			p.state = psFROMUSERHNPSTART
 		} else if c == ' ' {
-			p.state = PS_COMMANDSTART
+			p.state = psCOMMANDSTART
 			p.m.HostName = p.s
 			p.s = ""
 		} else if c == ':' {
 			p.s += string(c)
-			p.state = PS_FROMUSERHIPV6
+			p.state = psFROMUSERHIPV6
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMUSERHNPSTART:
+	case psFROMUSERHNPSTART:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' {
 			p.s += string(c)
-			p.state = PS_FROMUSERHNPCONT
+			p.state = psFROMUSERHNPCONT
 		} else if c == ' ' {
-			p.state = PS_COMMANDSTART
+			p.state = psCOMMANDSTART
 			p.m.HostName = p.s
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMUSERHNPCONT:
+	case psFROMUSERHNPCONT:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '_' || c == '-' {
 			p.s += string(c)
 		} else if c == '.' {
 			p.s += string(c)
-			p.state = PS_FROMUSERHNPSTART
+			p.state = psFROMUSERHNPSTART
 		} else if c == ' ' {
-			p.state = PS_COMMANDSTART
+			p.state = psCOMMANDSTART
 			p.m.HostName = p.s
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_FROMUSERHIPV6:
+	case psFROMUSERHIPV6:
 		if (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || (c >= '0' && c <= '9') ||
 			c == ':' {
 			p.s += string(c)
 		} else if c == ' ' {
-			p.state = PS_COMMANDSTART
+			p.state = psCOMMANDSTART
 			p.m.HostName = p.s
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_COMMANDSTART:
+	case psCOMMANDSTART:
 		if c >= '0' && c <= '9' {
 			p.s += string(c)
-			p.state = PS_COMMANDNCONT
+			p.state = psCOMMANDNCONT
 		} else if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
 			p.s += string(c)
-			p.state = PS_COMMANDCONT
+			p.state = psCOMMANDCONT
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_COMMANDCONT:
+	case psCOMMANDCONT:
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
 			p.s += string(c)
 		} else if c == ' ' {
 			p.m.Command = p.s
-			p.state = PS_ARGSTART
+			p.state = psARGSTART
 			p.s = ""
 		} else if c == '\r' {
 			p.m.Command = p.s
-			p.state = PS_EXPECTLF
+			p.state = psEXPECTLF
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_COMMANDNCONT:
+	case psCOMMANDNCONT:
 		if c >= '0' && c <= '9' {
 			p.s += string(c)
-			p.state = PS_COMMANDNCONT2
+			p.state = psCOMMANDNCONT2
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_COMMANDNCONT2:
+	case psCOMMANDNCONT2:
 		if c >= '0' && c <= '9' {
 			p.s += string(c)
-			p.state = PS_PREARGSTART
+			p.state = psPREARGSTART
 			p.m.Command = p.s
 			p.s = ""
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_PREARGSTART:
+	case psPREARGSTART:
 		if c == ' ' {
-			p.state = PS_ARGSTART
+			p.state = psARGSTART
 		} else if c == '\r' {
-			p.state = PS_EXPECTLF
+			p.state = psEXPECTLF
 		} else {
 			return errMalformedMessage
 		}
 
-	case PS_ARGSTART:
+	case psARGSTART:
 		if c == ':' {
-			p.state = PS_TARGCONT
+			p.state = psTARGCONT
 		} else if c == '\r' || c == '\n' || c == '\x00' || c == ' ' {
 			return errMalformedMessage
 		} else {
 			p.s += string(c)
-			p.state = PS_ARGCONT
+			p.state = psARGCONT
 		}
 
-	case PS_ARGCONT:
+	case psARGCONT:
 		if c == ' ' || c == '\r' {
 			p.m.Args = append(p.m.Args, p.s)
 			p.s = ""
 			if c == '\r' {
-				p.state = PS_EXPECTLF
+				p.state = psEXPECTLF
 			} else {
-				p.state = PS_ARGSTART
+				p.state = psARGSTART
 			}
 		} else if c == '\n' || c == '\x00' {
 			return errMalformedMessage
@@ -388,22 +388,22 @@ func (p *IRCParser) pdispatch(c rune) error {
 			p.s += string(c)
 		}
 
-	case PS_TARGCONT:
+	case psTARGCONT:
 		if c == '\r' {
 			p.m.Args = append(p.m.Args, p.s)
 			p.s = ""
-			p.state = PS_EXPECTLF
+			p.state = psEXPECTLF
 		} else if c == '\n' || c == '\x00' {
 			return errMalformedMessage
 		} else {
 			p.s += string(c)
 		}
 
-	case PS_EXPECTLF:
+	case psEXPECTLF:
 		if c != '\n' {
 			return errMalformedMessage
 		} else {
-			p.state = PS_DRIFTING
+			p.state = psDRIFTING
 			p.msgs = append(p.msgs, p.m)
 			p.m = &IRCMessage{}
 		}
