@@ -3,6 +3,7 @@ package dnsbl
 import "sync"
 import "time"
 import "net"
+import "fmt"
 
 type cacheItem struct {
 	ip net.IP
@@ -93,6 +94,6 @@ func (d *DNSBL) Check(ip net.IP) (r net.IP, err error) {
 		return
 	}
 
-	d.cache[ip_s] = dnsblCacheItem{r, time.Now()}
+	d.cache[ip_s] = cacheItem{r, time.Now()}
 	return
 }
