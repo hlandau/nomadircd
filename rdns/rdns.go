@@ -6,6 +6,8 @@ import "regexp"
 
 var re_validHostName = regexp.MustCompile(`^([a-zA-Z0-9][a-zA-Z0-9-]*\.)*[a-zA-Z0-9][a-zA-Z0-9-]*\.?$`)
 
+var ErrForwardMismatch = fmt.Errorf("address from forward RDNS lookup doesn't match actual address")
+
 func Lookup(ip net.IP) (string, error) {
 	ips := ip.String()
 
@@ -29,21 +31,21 @@ func Lookup(ip net.IP) (string, error) {
 
 	addrs, err := net.LookupHost(n)
 	if err != nil {
-		return "", err
+		return n, err
 	}
 
 	if len(addrs) == 0 {
-		return "", fmt.Errorf("no results for forward lookup on received RDNS name")
+		return n, fmt.Errorf("no results for forward lookup on received RDNS name")
 	}
 
 	if len(addrs) != 1 {
 		// XXX
-		return "", fmt.Errorf("got multiple results for forward lookup on received RDNS name")
+		return n, fmt.Errorf("got multiple results for forward lookup on received RDNS name")
 	}
 
 	a := addrs[0]
 	if a != ips {
-		return "", fmt.Errorf("address from forward RDNS lookup doesn't match actual address")
+		return n, ErrForwardMismatch
 	}
 
 	return n, nil
