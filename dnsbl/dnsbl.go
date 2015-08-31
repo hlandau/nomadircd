@@ -46,7 +46,7 @@ func (d *DNSBL) query(ip net.IP) (r net.IP, err error) {
 		return d.queryv6(ip)
 	}
 
-	ds := fmt.Sprintf("%u.%u.%u.%u.%s", ip4[3], ip4[2], ip4[1], ip4[0], d.domain)
+	ds := fmt.Sprintf("%v.%v.%v.%v.%s", ip4[3], ip4[2], ip4[1], ip4[0], d.domain)
 
 	addrs, err := net.LookupIP(ds)
 	if err != nil {

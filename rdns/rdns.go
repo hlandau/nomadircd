@@ -29,7 +29,7 @@ func Lookup(ip net.IP) (string, error) {
 		return "", fmt.Errorf("invalid hostname received from RDNS")
 	}
 
-	addrs, err := net.LookupHost(n)
+	addrs, err := net.LookupIP(n)
 	if err != nil {
 		return n, err
 	}
@@ -38,17 +38,13 @@ func Lookup(ip net.IP) (string, error) {
 		return n, fmt.Errorf("no results for forward lookup on received RDNS name")
 	}
 
-	if len(addrs) != 1 {
-		// XXX
-		return n, fmt.Errorf("got multiple results for forward lookup on received RDNS name")
+	for _, a := range addrs {
+		if a.Equal(ip) {
+			return n, nil
+		}
 	}
 
-	a := addrs[0]
-	if a != ips {
-		return n, ErrForwardMismatch
-	}
-
-	return n, nil
+	return n, ErrForwardMismatch
 }
 
 func LookupRemote(conn net.Conn) (string, error) {
