@@ -4,7 +4,7 @@ import "net"
 import "github.com/hlandau/degoutils/log"
 import "github.com/hlandau/nomadircd/ident"
 import "github.com/hlandau/nomadircd/rdns"
-import "github.com/hlandau/irc/parse"
+import "github.com/hlandau/irc/ircparse"
 import "fmt"
 import "regexp"
 import "strings"
@@ -579,7 +579,7 @@ func (c *Client) SetRealName(realName string) error {
 }
 
 // Message must be CRLF terminated.
-func (c *Client) send(msg *parse.IRCMessage) {
+func (c *Client) send(msg *ircparse.Message) {
 	if c.isTerminated {
 		return
 	}
@@ -596,19 +596,19 @@ func (c *Client) send(msg *parse.IRCMessage) {
 }
 
 // Message must not be CRLF terminated.
-func (c *Client) sendFromServer(msg *parse.IRCMessage) {
+func (c *Client) sendFromServer(msg *ircparse.Message) {
 	msg.ServerName = c.s.cfg.ServerName
 	c.send(msg)
 }
 
 func (c *Client) sendLinkError(reason string) {
-	msg := parse.IRCMessage{}
+	msg := ircparse.Message{}
 	msg.Command = "ERROR"
 	msg.Args = append(msg.Args, "Closing Link: "+c.RealHostName+" ("+reason+")")
 	c.send(&msg)
 }
 
-func (c *Client) sendFromUser(from *Client, msg *parse.IRCMessage) {
+func (c *Client) sendFromUser(from *Client, msg *ircparse.Message) {
 	msg.NickName = from.NickName
 	msg.UserName = from.UserName()
 	msg.HostName = from.HostName()
@@ -616,28 +616,28 @@ func (c *Client) sendFromUser(from *Client, msg *parse.IRCMessage) {
 }
 
 func (c *Client) sendNumericFromServer(n int, args ...string) {
-	m := parse.IRCMessage{}
+	m := ircparse.Message{}
 	m.Command = fmt.Sprintf("%03d", n)
 	m.Args = args
 	c.sendFromServer(&m)
 }
 
 func (c *Client) sendCommandFromUser(from *Client, cmd string, args ...string) {
-	m := parse.IRCMessage{}
+	m := ircparse.Message{}
 	m.Command = cmd
 	m.Args = args
 	c.sendFromUser(from, &m)
 }
 
 func (c *Client) sendCommandFromServer(cmd string, args ...string) {
-	m := parse.IRCMessage{}
+	m := ircparse.Message{}
 	m.Command = cmd
 	m.Args = args
 	c.sendFromServer(&m)
 }
 
 func (c *Client) sendCommandBare(cmd string, args ...string) {
-	m := parse.IRCMessage{}
+	m := ircparse.Message{}
 	m.Command = cmd
 	m.Args = args
 	c.send(&m)
@@ -654,7 +654,7 @@ func (c *Client) rxLoop() {
 	defer c.conn.Close()
 
 	buf := make([]byte, 512)
-	p := parse.IRCParser{}
+	p := ircparse.Parser{}
 
 	for {
 		n, err := c.conn.Read(buf)
@@ -664,7 +664,7 @@ func (c *Client) rxLoop() {
 		}
 
 		p.Parse(string(buf[0:n]))
-		msgs := p.GetMessages()
+		msgs := p.PopMessages()
 
 		for _, m := range msgs {
 			// message to process
@@ -674,7 +674,7 @@ func (c *Client) rxLoop() {
 	}
 }
 
-func (c *Client) processIncomingMessage(m *parse.IRCMessage) {
+func (c *Client) processIncomingMessage(m *ircparse.Message) {
 	log.Info(fmt.Sprintf("rx msg: %+v", m))
 	c.lastMessage = time.Now()
 
@@ -741,7 +741,7 @@ func (c *Client) processIncomingMessage(m *parse.IRCMessage) {
 	}
 }
 
-func (c *Client) processIncomingMessageRegistered(m *parse.IRCMessage) {
+func (c *Client) processIncomingMessageRegistered(m *ircparse.Message) {
 	switch m.Command {
 	case "PRIVMSG", "NOTICE":
 		if len(m.Args) < 2 {

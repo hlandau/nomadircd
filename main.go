@@ -1,14 +1,13 @@
 package main
 
 import "github.com/hlandau/nomadircd/server"
-import "gopkg.in/hlandau/service.v1"
-import "github.com/hlandau/degoutils/config"
+import "gopkg.in/hlandau/service.v2"
+import "gopkg.in/hlandau/easyconfig.v1"
 
 func main() {
 	cfg := server.Config{}
-	config := config.Configurator{
-		ProgramName:     "nomadircd",
-		ConfigFilePaths: []string{"$BIN/../etc/nomad.conf", "/etc/nomad/nomad.conf"},
+	config := easyconfig.Configurator{
+		ProgramName: "nomadircd",
 	}
 	config.ParseFatal(&cfg)
 

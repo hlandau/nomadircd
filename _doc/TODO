@@ -1,0 +1,11 @@
+TODO
+----
+
+- Handle disconnects/timeouts properly. Currently it will break.
+
+- Implement MODE, KICK, QUIT, KILL, KLINE, TOPIC, everything.
+
+- Rate limiting; classes; ircops.
+
+- ident checking; hostname checking.
+
